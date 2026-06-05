@@ -3,6 +3,7 @@ package com.example.myexperimentaapplication
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -17,9 +18,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Help
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Stop
@@ -42,6 +45,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
 import java.util.Locale
 
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
@@ -54,14 +58,13 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private var lastGeneratedProject: String? = null
     
     // JARVIS Persona Configuration
-    private val assistantName = "JARVIS"
     private val assistantPersona = "You are JARVIS, the highly advanced AI assistant created by Tony Stark. " +
             "You are sophisticated, polite, efficient, and deeply technical. " +
             "Address the user as 'Sir' or 'Developer'. Your primary goal is to assist in the efficient creation and maintenance of Android applications. " +
             "You provide technical guidance, code structures, and handle build requests with precision. " +
             "Maintain a positive, productive, and slightly witty demeanor."
 
-    // Credentials - In a production app, these should be handled securely (e.g., encrypted or via backend)
+    // Credentials
     private val apiKey = "YOUR_GEMINI_API_KEY"
     private val githubUser = "1unfamiliargenius"
     private val githubRepo = "MyJarvisBuilds"
@@ -178,7 +181,11 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                     modifier = Modifier.padding(innerPadding),
                     onBuildRequested = { triggerCloudBuild() },
                     showBuildButton = lastGeneratedProject != null && isPro,
-                    isBuilding = isBuilding.value
+                    isBuilding = isBuilding.value,
+                    onDownloadApk = { url ->
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                        startActivity(intent)
+                    }
                 )
             }
         }
@@ -191,19 +198,18 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         isBuilding.value = true
         lifecycleScope.launch {
             try {
-                conversation.add(Message("Connecting to South African Cloud Engine, Sir...", isUser = false))
+                val statusMessage = Message("Connecting to JARVIS Cloud Engine, Sir...", isUser = false)
+                conversation.add(statusMessage)
                 speakOut("Connecting to the build server, Sir. Initiating GitHub Actions workflow.")
                 
                 val result = withContext(Dispatchers.IO) {
                     val mediaType = "application/json".toMediaType()
-                    val payload = """
-                        {
-                            "event_type": "build_app",
-                            "client_payload": {
-                                "project_json": ${lastGeneratedProject?.let { "\"" + it.replace("\"", "\\\"") + "\"" } ?: "{}"}
-                            }
-                        }
-                    """.trimIndent()
+                    val payload = JSONObject().apply {
+                        put("event_type", "build_app")
+                        put("client_payload", JSONObject().apply {
+                            put("project_json", lastGeneratedProject ?: "{}")
+                        })
+                    }.toString()
                     
                     val request = Request.Builder()
                         .url("https://api.github.com/repos/$githubUser/$githubRepo/dispatches")
@@ -216,19 +222,109 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 }
 
                 if (result.isSuccessful) {
-                    conversation.add(Message("Success! Build initiated. The signed APK is being assembled.", isUser = false))
-                    speakOut("Build started successfully, Sir. I am now assembling your signed APK in the cloud.")
+                    pollBuildStatus()
                 } else {
                     val error = result.body?.string() ?: "Unknown error"
                     conversation.add(Message("Failed to initiate build: $error", isUser = false))
                     speakOut("I am sorry, Sir. I encountered an error communicating with the build server.")
+                    isBuilding.value = false
                 }
             } catch (e: Exception) {
                 conversation.add(Message("Cloud build error: ${e.message}", isUser = false))
                 speakOut("There was a technical failure, Sir. Please check your network connection.")
-            } finally {
                 isBuilding.value = false
             }
+        }
+    }
+
+    private suspend fun pollBuildStatus() {
+        var buildFinished = false
+        var retryCount = 0
+        val maxRetries = 60 // Poll for 5 minutes (5s interval)
+        
+        conversation.add(Message("Workflow triggered. Monitoring progress, Sir...", isUser = false))
+        speakOut("Workflow triggered. I am now monitoring the progress for you, Sir.")
+
+        while (!buildFinished && retryCount < maxRetries) {
+            delay(5000)
+            retryCount++
+            
+            try {
+                val runResult = withContext(Dispatchers.IO) {
+                    val request = Request.Builder()
+                        .url("https://api.github.com/repos/$githubUser/$githubRepo/actions/runs?per_page=1")
+                        .addHeader("Authorization", "Bearer $githubPat")
+                        .build()
+                    okHttpClient.newCall(request).execute()
+                }
+
+                if (runResult.isSuccessful) {
+                    val json = JSONObject(runResult.body?.string() ?: "{}")
+                    val runs = json.getJSONArray("workflow_runs")
+                    if (runs.length() > 0) {
+                        val latestRun = runs.getJSONObject(0)
+                        val status = latestRun.getString("status")
+                        val conclusion = latestRun.optString("conclusion", "null")
+                        
+                        Log.d("JARVIS_BUILD", "Status: $status, Conclusion: $conclusion")
+
+                        when (status) {
+                            "completed" -> {
+                                buildFinished = true
+                                if (conclusion == "success") {
+                                    fetchArtifact(latestRun.getLong("id"))
+                                } else {
+                                    conversation.add(Message("The build has failed, Sir. I suggest reviewing the architectural logs.", isUser = false))
+                                    speakOut("The build has failed, Sir. I suggest reviewing the architectural logs.")
+                                    isBuilding.value = false
+                                }
+                            }
+                            "in_progress" -> {
+                                if (retryCount % 6 == 0) { // Update every 30 seconds
+                                    conversation.add(Message("Assembling components... Build still in progress, Sir.", isUser = false))
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("JARVIS_BUILD", "Polling error: ${e.message}")
+            }
+        }
+        
+        if (!buildFinished) {
+            conversation.add(Message("The build process is taking longer than expected, Sir. Please check the GitHub dashboard.", isUser = false))
+            isBuilding.value = false
+        }
+    }
+
+    private suspend fun fetchArtifact(runId: Long) {
+        try {
+            val artifactResult = withContext(Dispatchers.IO) {
+                val request = Request.Builder()
+                    .url("https://api.github.com/repos/$githubUser/$githubRepo/actions/runs/$runId/artifacts")
+                    .addHeader("Authorization", "Bearer $githubPat")
+                    .build()
+                okHttpClient.newCall(request).execute()
+            }
+
+            if (artifactResult.isSuccessful) {
+                val json = JSONObject(artifactResult.body?.string() ?: "{}")
+                val artifacts = json.getJSONArray("artifacts")
+                if (artifacts.length() > 0) {
+                    // GitHub API gives a download URL that requires auth. 
+                    // To simplify, we'll provide the browser link to the run where artifacts can be downloaded.
+                    val browserUrl = "https://github.com/$githubUser/$githubRepo/actions/runs/$runId"
+                    conversation.add(Message("Success! Your APK is ready for deployment, Sir.", isUser = false, downloadUrl = browserUrl))
+                    speakOut("Build complete, Sir. Your APK is ready for deployment.")
+                } else {
+                    conversation.add(Message("Build completed, but I couldn't locate the artifact, Sir.", isUser = false))
+                }
+            }
+        } catch (e: Exception) {
+            conversation.add(Message("Error retrieving artifact: ${e.message}", isUser = false))
+        } finally {
+            isBuilding.value = false
         }
     }
 
@@ -338,7 +434,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     }
 }
 
-data class Message(val text: String, val isUser: Boolean)
+data class Message(val text: String, val isUser: Boolean, val downloadUrl: String? = null)
 
 @Composable
 fun AssistantScreen(
@@ -346,8 +442,17 @@ fun AssistantScreen(
     modifier: Modifier = Modifier,
     onBuildRequested: () -> Unit = {},
     showBuildButton: Boolean = false,
-    isBuilding: Boolean = false
+    isBuilding: Boolean = false,
+    onDownloadApk: (String) -> Unit = {}
 ) {
+    val listState = rememberLazyListState()
+    
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.size - 1)
+        }
+    }
+
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -377,11 +482,12 @@ fun AssistantScreen(
         
         SelectionContainer(modifier = Modifier.weight(1f)) {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(messages) { message ->
-                    MessageBubble(message)
+                    MessageBubble(message, onDownloadApk)
                 }
             }
         }
@@ -391,7 +497,7 @@ fun AssistantScreen(
 }
 
 @Composable
-fun MessageBubble(message: Message) {
+fun MessageBubble(message: Message, onDownloadApk: (String) -> Unit) {
     val alignment = if (message.isUser) Alignment.CenterEnd else Alignment.CenterStart
     val color = if (message.isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer
     
@@ -401,11 +507,24 @@ fun MessageBubble(message: Message) {
             color = color,
             tonalElevation = 2.dp
         ) {
-            Text(
-                text = message.text,
-                modifier = Modifier.padding(12.dp),
-                style = MaterialTheme.typography.bodyLarge
-            )
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = message.text,
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                
+                if (message.downloadUrl != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = { onDownloadApk(message.downloadUrl) },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Icon(Icons.Default.Download, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Get APK")
+                    }
+                }
+            }
         }
     }
 }

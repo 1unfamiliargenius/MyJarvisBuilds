@@ -11,6 +11,7 @@ composeBom = "2026.02.01"
 generativeai = "0.9.0"
 billing = "9.0.0"
 okhttp = "4.12.0"
+kotlinxSerializationJson = "1.6.3"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -31,6 +32,7 @@ androidx-compose-material-icons-extended = { group = "androidx.compose.material"
 google-generativeai = { group = "com.google.ai.client.generativeai", name = "generativeai", version.ref = "generativeai" }
 androidx-billing-ktx = { group = "com.android.billingclient", name = "billing-ktx", version.ref = "billing" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerializationJson" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
